@@ -6,6 +6,13 @@
 #include <functional>
 #include "socket.h"
 
+/*  本文件高度参考 http://blog.csdn.net/piggyxp/article/details/6922277
+ *
+ *  原作者：PiggyXP【小猪】 http://blog.csdn.net/PiggyXP
+ *
+ *  本人对其进行改写以支持更多功能
+ */
+
 class Exception{};
 
 // 缓冲区长度 (1024*8)
