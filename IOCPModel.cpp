@@ -26,14 +26,17 @@
 #define RELEASE_SOCKET(x)               {if(x !=INVALID_SOCKET) { closesocket(x);x=INVALID_SOCKET;}}
 
 CRITICAL_SECTION cs_printf;
+CRITICAL_SECTION cs_send;
 
 int printf_w(const char *format, ...) {
+
     ::EnterCriticalSection(&cs_printf);
     va_list ap;
     va_start(ap, format);
-    vprintf(format, ap);
+    //vprintf(format, ap);
     va_end(ap);
     ::LeaveCriticalSection(&cs_printf);
+
 }
 
 IOCPModel::IOCPModel(void) :
@@ -46,13 +49,14 @@ IOCPModel::IOCPModel(void) :
         m_lpfnAcceptEx(NULL),
         m_pListenContext(NULL) {
     ::InitializeCriticalSection(&cs_printf);
-
+    ::InitializeCriticalSection(&cs_send);
 }
 
 
 IOCPModel::~IOCPModel(void) {
     // 确保资源彻底释放
     ::DeleteCriticalSection(&cs_printf);
+    ::DeleteCriticalSection(&cs_send);
     this->Stop();
 }
 
@@ -241,7 +245,7 @@ bool IOCPModel::_InitializeIOCP() {
 
     // 根据本机中的处理器数量，建立对应的线程数
     m_nThreads = WORKER_THREADS_PER_PROCESSOR * _GetNoOfProcessors();
-
+    //m_nThreads = 1;
     // 为工作者线程初始化句柄
     m_phWorkerThreads = new HANDLE[m_nThreads];
 
@@ -485,27 +489,26 @@ bool IOCPModel::_DoAccpet(PER_SOCKET_CONTEXT *pSocketContext, PER_IO_CONTEXT *pI
     ///////////////////////////////////////////////////////////////////////////////////////////////////
     // 3. 继续，建立其下的IoContext，用于在这个Socket上投递第一个Recv数据请求
     PER_IO_CONTEXT *pNewIoContext = pNewSocketContext->GetNewIoContext();
-
-
     pNewIoContext->m_sockAccept = pNewSocketContext->m_Socket;
     // 如果Buffer需要保留，就自己拷贝一份出来
     //memcpy( pNewIoContext->m_szBuffer,pIoContext->m_szBuffer,MAX_BUFFER_LEN );
 
     // 绑定完毕之后，就可以开始在这个Socket上投递完成请求了
+
     if (nRecRet == 0) {
         //准备发送数据
         if (!this->_PostSend(pNewSocketContext, pNewIoContext)) {
             pNewSocketContext->RemoveContext(pNewIoContext);
             return false;
         }
-    }
-    else {
-        //继续接受数据
+    }else{
         if (!this->_PostRecv(pNewIoContext)) {
             pNewSocketContext->RemoveContext(pNewIoContext);
             return false;
         }
     }
+
+
 
 
     /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -557,10 +560,14 @@ bool IOCPModel::_PostSend(PER_SOCKET_CONTEXT *pSocketContext, PER_IO_CONTEXT *pI
     pIoContext->m_OpType = SEND_POSTED;
     pIoContext->m_isContinue = (char) m_pIOCPCallback->send_cb(ClientAddr->sin_addr.S_un.S_addr, ClientAddr->sin_port,
                                                                pIoContext->m_wsaBuf.buf);
+
     //pIoContext->m_isContinue = (char) m_pIOCPCallback->send_cb(ClientAddr->sin_addr.S_un.S_addr,ClientAddr->sin_port,pIoContext->m_wsaBuf.buf);
 
     // 初始化完成后，，投递WSASend请求
+    //::EnterCriticalSection(&cs_send);
     int nBytesRecv = WSASend(pIoContext->m_sockAccept, p_wbuf, 1, &dwBytes, dwFlags, p_ol, NULL);
+    //::LeaveCriticalSection(&cs_send);
+
 
     // 如果返回值错误，并且错误的代码并非是Pending的话，那就说明这个重叠请求失败了
     if ((SOCKET_ERROR == nBytesRecv) && (WSA_IO_PENDING != WSAGetLastError())) {
@@ -574,18 +581,18 @@ bool IOCPModel::_PostSend(PER_SOCKET_CONTEXT *pSocketContext, PER_IO_CONTEXT *pI
 /////////////////////////////////////////////////////////////////
 // 在有接收的数据到达的时候，进行处理
 bool IOCPModel::_DoRecv(PER_SOCKET_CONTEXT *pSocketContext, PER_IO_CONTEXT *pIoContext) {
-    printf_w("DEBUG: DoRecv\n");
+    printf_w("DEBUG: DoRecv %s\n",pIoContext->m_wsaBuf.buf);
     SOCKADDR_IN *ClientAddr = &pSocketContext->m_ClientAddr;
+
     auto tmp = m_pIOCPCallback->recv_cb(ClientAddr->sin_addr.S_un.S_addr, ClientAddr->sin_port,
                                         pIoContext->m_wsaBuf.buf);
+
     // 然后开始投递下一个WSARecv请求
     if (tmp == 0) {
         //准备发送数据
-        return _PostSend(pSocketContext, pIoContext);
-    }
-    else {
-        //继续接受数据
-        return _PostRecv(pIoContext);
+        _PostSend(pSocketContext, pIoContext);
+    }else{
+        _PostRecv(pIoContext);
     }
 }
 
@@ -593,16 +600,17 @@ bool IOCPModel::_DoRecv(PER_SOCKET_CONTEXT *pSocketContext, PER_IO_CONTEXT *pIoC
 // 准备发送数据的时候，进行处理
 bool IOCPModel::_DoSend(PER_SOCKET_CONTEXT *pSocketContext, PER_IO_CONTEXT *pIoContext) {
     printf_w("DEBUG: DoSend\n");
+    SOCKADDR_IN *ClientAddr = &pSocketContext->m_ClientAddr;
     if (pIoContext->m_isFinal) {
         _RemoveContext(pSocketContext);
     }
     else {
-        if (pIoContext->m_isContinue) {
-            return _PostSend(pSocketContext, pIoContext);
-        }
-        else {
+        //if (pIoContext->m_isContinue) {
+         //   return _PostSend(pSocketContext, pIoContext);
+        //}
+        //else {
             return _PostRecv(pIoContext);
-        }
+        //}
     }
 }
 

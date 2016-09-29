@@ -13,12 +13,26 @@
 
 int printf_w(const char *format, ...);
 
+extern CRITICAL_SECTION cs_send;
+extern CRITICAL_SECTION cs_printf;
+int printf_wnod(const char *format, ...) {
+
+    ::EnterCriticalSection(&cs_printf);
+    va_list ap;
+    va_start(ap, format);
+    //vprintf(format, ap);
+    va_end(ap);
+    ::LeaveCriticalSection(&cs_printf);
+
+}
+
 class HTTPServer : public IOCPModel::ISocketCallback {
 private:
 
-    unsigned long long _HashSocketId(unsigned int ip_addr, unsigned int ip_port) {
+    unsigned long long __hash_socket_id(unsigned int ip_addr, unsigned int ip_port) {
         return (((unsigned long long) ip_addr) << 32) | ip_port;
     }
+
 
     IOCPModel iocp;
 
@@ -64,12 +78,13 @@ public:
 
     class HTTPResponse{
     public:
-        HTTPResponseHeader httpResponseHeader;
+        std::unique_ptr<HTTPResponseHeader> httpResponseHeader
+                = std::unique_ptr<HTTPResponseHeader>(new HTTPResponseHeader());
         std::string body = "test";
         std::string get_str(){
-            httpResponseHeader.set_header("Content-Length",Helper::itos(body.length()));
-            httpResponseHeader.set_header("Connection","keep-alive");
-            return httpResponseHeader.get_str() + body;
+            httpResponseHeader->set_header("Content-Length",Helper::itos(body.length()));
+            httpResponseHeader->set_header("Connection","close");
+            return httpResponseHeader->get_str() + body;
         }
     };
 
@@ -236,8 +251,10 @@ public:
 
 private:
     int recv_cb(unsigned int ip_addr, unsigned int ip_port, const char *buf) override {
-        auto &ctx = userContext[_HashSocketId(ip_addr, ip_port)];
-        printf_w("client %d:%d infomation: %s.\n", ip_addr, ip_port, buf);
+        ::EnterCriticalSection(&cs_send);
+        auto &ctx = userContext[__hash_socket_id(ip_addr, ip_port)];
+        ::LeaveCriticalSection(&cs_send);
+        printf_wnod("client %d:%d infomation:.%s\n", ip_addr, ip_port,buf);
         if(ctx.httpRequest.accept_buf(buf)){
             if(ctx.httpRequest.status == HTTPRequest::Status::RECV_ERROR){
                 httpRequestHandler->req_cb_err(ctx.httpRequest,ctx.httpResponse);
@@ -251,27 +268,44 @@ private:
     }
 
     int send_cb(unsigned int ip_addr, unsigned int ip_port, char *buf) override {
-        auto &ctx = userContext[_HashSocketId(ip_addr, ip_port)];
+        ::EnterCriticalSection(&cs_send);
+        auto &ctx = userContext[__hash_socket_id(ip_addr, ip_port)];
+        ::LeaveCriticalSection(&cs_send);
         strcpy(buf,ctx.httpResponse.get_str().c_str());
-        printf_w("client %d:%d send!\n%s\n", ip_addr, ip_port, buf);
+        ::EnterCriticalSection(&cs_send);
+        userContext[__hash_socket_id(ip_addr, ip_port)] = UserContext();
+        ::LeaveCriticalSection(&cs_send);
+        printf_wnod("client %d:%d send! len %s\n", ip_addr, ip_port, buf);
         //strcpy(buf, "Hello World!");
         return 0;
     }
 
     int connect_cb(unsigned int ip_addr, unsigned int ip_port) override {
+        static int cnt_cnt = 0;
+        ::EnterCriticalSection(&cs_send);
         userContext.emplace(std::piecewise_construct,
-                            std::forward_as_tuple(_HashSocketId(ip_addr, ip_port)),
+                            std::forward_as_tuple(__hash_socket_id(ip_addr, ip_port)),
                             std::forward_as_tuple());
+        ::LeaveCriticalSection(&cs_send);
+
+
+        cnt_cnt ++;
+        printf_wnod("connect:%d!\n",cnt_cnt);
     }
 
     int disconnect_cb(unsigned int ip_addr, unsigned int ip_port) override {
-        auto &ctx = userContext[_HashSocketId(ip_addr, ip_port)];
+        ::EnterCriticalSection(&cs_send);
+        auto &ctx = userContext[__hash_socket_id(ip_addr, ip_port)];
+        ::LeaveCriticalSection(&cs_send);
         if(ctx.httpRequest.is_ready()){
             httpRequestHandler->req_cb(ctx.httpRequest,ctx.httpResponse);
         }else{
             httpRequestHandler->req_cb_err(ctx.httpRequest,ctx.httpResponse);
         }
-        userContext.erase(_HashSocketId(ip_addr, ip_port));
+        ::EnterCriticalSection(&cs_send);
+        userContext.erase(__hash_socket_id(ip_addr, ip_port));
+        ::LeaveCriticalSection(&cs_send);
+        printf_wnod("dis\n");
     }
     std::map<unsigned long long, UserContext> userContext;
     IHTTPRequestHandler * httpRequestHandler = nullptr;
@@ -279,16 +313,21 @@ private:
 
 class MyHTTPRequestHandler : public HTTPServer::IHTTPRequestHandler{
     virtual void req_cb(HTTPServer::HTTPRequest & req,HTTPServer::HTTPResponse & res){
-        res.httpResponseHeader.set_header("My-Daye","XGS");
-        res.body = "<html><body><h1>FUCK XGS</h1></body></html>";
+        res.httpResponseHeader->set_header("My-Daye","XGS");
+        res.body = "<html><body><h1>Hello World</h1></body></html>";
+        req.httpRequestHeader;
     }
     virtual void req_cb_err(HTTPServer::HTTPRequest & req,HTTPServer::HTTPResponse & res){
-        res.httpResponseHeader.status_code = "400";
-        res.httpResponseHeader.message     = "Bad Request";
+        res.httpResponseHeader->status_code = "400";
+        res.httpResponseHeader->message     = "Bad Request";
     }
 };
 
-int main() {
+
+
+
+
+int main(){
     HTTPServer http;
     http.register_http_request_callback(new MyHTTPRequestHandler());
     http.listen(1234);
